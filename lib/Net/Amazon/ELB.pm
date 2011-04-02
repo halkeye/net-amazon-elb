@@ -12,6 +12,7 @@ use MIME::Base64 qw(encode_base64 decode_base64);
 use HTTP::Date qw(time2isoz);
 use Params::Validate qw(validate SCALAR ARRAYREF);
 use Data::Dumper qw(Dumper);
+use URI::Escape;
 
 $VERSION = '0.1';
 
@@ -69,6 +70,7 @@ has 'AWSAccessKeyId'	=> ( is => 'ro', isa => 'Str', required => 1 );
 has 'SecretAccessKey'	=> ( is => 'ro', isa => 'Str', required => 1 );
 has 'debug'				=> ( is => 'ro', isa => 'Str', required => 0, default => 0 );
 has 'signature_version'	=> ( is => 'ro', isa => 'Int', required => 1, default => 2 );
+has 'signature_method'	=> ( is => 'ro', isa => 'Str', required => 1, default => 'HmacSHA1' );
 has 'version'			=> ( is => 'ro', isa => 'Str', required => 1, default => '2009-05-15' );
 has 'timestamp'			=> ( 
 	is			=> 'ro', 
@@ -88,7 +90,7 @@ has 'base_url'			=> (
 	required	=> 1,
 	lazy		=> 1,
 	default		=> sub {
-		return 'http://elasticloadbalancing.amazonaws.com';
+		return 'elasticloadbalancing.amazonaws.com';
 	}
 );
 
@@ -98,35 +100,41 @@ sub _sign {
 	my $action						= delete $args{Action};
 	my %sign_hash					= %args;
 	$sign_hash{AWSAccessKeyId}		= $self->AWSAccessKeyId;
-	$sign_hash{Action}				= $action;
-	$sign_hash{Timestamp}			= $self->timestamp;
-	$sign_hash{Version}				= $self->version;
+    $sign_hash{SignatureMethod}     = $self->signature_method;
 	$sign_hash{SignatureVersion}	= $self->signature_version;
-	my $sign_this;
+	$sign_hash{Version}				= $self->version;
+	$sign_hash{Timestamp}			= $self->timestamp;
+	$sign_hash{Action}			    = $action;
 
+	my $sign_this = '';;
 	# The sign string must be alphabetical in a case-insensitive manner.
-	foreach my $key (sort { lc($a) cmp lc($b) } keys %sign_hash) {
-		$sign_this .= $key . $sign_hash{$key};
+	foreach my $key (sort keys %sign_hash) {
+        $sign_this .= '&' if $sign_this;
+		$sign_this .= $key .'='. $self->_urlencode($sign_hash{$key});
 	}
 
-	$self->_debug("QUERY TO SIGN: $sign_this");
-	my $encoded = $self->_hashit($self->SecretAccessKey, $sign_this);
+    my $stringToSign = "GET\n" . lc($self->base_url) . "\n/\n$sign_this";
+    {
+        my $stringToSign_pretty = $stringToSign;
+        $stringToSign_pretty =~ s/&/\n&/g;
+        $self->_debug("QUERY TO SIGN: $stringToSign_pretty");
+    }
+    my $uri = URI->new('http://' .$self->base_url.'/');
 
-	my $uri = URI->new($self->base_url);
-	my %params = (
-		Action				=> $action,
-		SignatureVersion	=> $self->signature_version,
-		AWSAccessKeyId		=> $self->AWSAccessKeyId,
-		Timestamp			=> $self->timestamp,
-		Version				=> $self->version,
-		Signature			=> $encoded,
-		%args
-	);
-	
+	$sign_hash{Signature} = $self->_hashit($self->SecretAccessKey, $stringToSign);
+
+    my $query = "";
+	foreach my $key (sort keys %sign_hash) {
+        $query .= '&' if $query;
+		$query .= $key .'='. $self->_urlencode($sign_hash{$key});
+	}
+    $uri->query($query);
+
 	my $ur	= $uri->as_string();
 	$self->_debug("GENERATED QUERY URL: $ur");
+
 	my $ua	= LWP::UserAgent->new();
-	my $res	= $ua->post($ur, \%params);
+	my $res	= $ua->get($ur);
 	# We should force <item> elements to be in an array
 	my $xs	= XML::Simple->new(ForceArray => qr/(?:item|Errors)/i, KeyAttr => '');
 	my $xml;
@@ -151,10 +159,17 @@ EOXML
 		$xml = $res->content();
 	}
 
+	warn Dumper($xml) . "\n\n" if $self->debug == 1;
 	my $ref = $xs->XMLin($xml);
 	warn Dumper($ref) . "\n\n" if $self->debug == 1;
 
 	return $ref;
+}
+
+
+sub _urlencode {
+    my ( $self, $unencoded ) = @_;
+    return uri_escape_utf8( $unencoded );
 }
 
 sub _parse_errors {
@@ -243,14 +258,14 @@ sub register_instances_with_load_balancer {
 		my $instance_ids	= delete $args{InstanceId};
 		my $count			= 1;
 		foreach my $instance_id (@{$instance_ids}) {
-			$args{"InstanceId." . $count} = $instance_id;
+			$args{"Instances.member." . $count . '.InstanceId'} = $instance_id;
 			$count++;
 		}
 	}
 	
 	my $xml = $self->_sign(Action  => 'RegisterInstancesWithLoadBalancer', %args);	
-	if ( grep { defined && length } $xml->{Errors} ) {
-		return $self->_parse_errors($xml);
+	if ( $xml->{Errors} && grep { defined && length } $xml->{Errors} ) {
+		return $self->_parse_errors($xml->{ResponseMetaData});
 	}
 	else {
         ### TODO --- handle return

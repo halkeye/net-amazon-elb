@@ -1,0 +1,17 @@
+Net::Amazon::ELB
+
+Perl interface to the Amazon Elastic Load Balancer (ELB).
+
+INSTALLATION
+
+To install this module, run the following commands:
+
+perl Makefile.PL
+make
+make test
+make install
+
+COPYRIGHT
+
+Copyright (c) 20011 Gavin Mogan.  This program is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself.
